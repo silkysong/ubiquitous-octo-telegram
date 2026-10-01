@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-L7856P3VNT"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'G-L7856P3VNT');
+    </script>
+    <base href="https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/">
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Unity Web Player | Hollow Knight SilkSong</title>
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <link rel="stylesheet" href="TemplateData/style.css">
+    
+    <style>
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        background-color: #000;
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      #unity-container {
+        width: 100%;
+        height: 100%;
+        position: absolute;
+        top: 0;
+        left: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #unity-canvas {
+        width: 100% !important;
+        height: 100% !important;
+        background: #000;
+        display: block;
+      }
+      #loading-text {
+        position: absolute;
+        top: 40%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #e2e8f0;
+        font-size: 22px;
+        font-weight: bold;
+        letter-spacing: 1.5px;
+        text-align: center;
+        z-index: 100;
+        text-shadow: 0 2px 10px rgba(0,0,0,0.8);
+      }
+      #reset-cache-btn {
+        position: absolute;
+        top: 52%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        display: none;
+        padding: 12px 24px;
+        background: #e11d48;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: bold;
+        font-size: 14px;
+        cursor: pointer;
+        z-index: 101;
+        box-shadow: 0 4px 12px rgba(225, 29, 72, 0.4);
+      }
+      #sidebarad1,
+      #sidebarad2 {
+        position: fixed;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 160px;
+        height: 600px;
+        padding: 0;
+        margin: 0;
+        z-index: 999999;
+      }
+      #sidebarad1 { left: 0; }
+      #sidebarad2 { right: 0; }
+      .sidebar-close {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 22px;
+        height: 22px;
+        line-height: 22px;
+        text-align: center;
+        background: rgba(0,0,0,0.7);
+        color: #fff;
+        font-size: 14px;
+        cursor: pointer;
+        user-select: none;
+        z-index: 10;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loading-text">LOADING SILKSONG...</div>
+    <button id="reset-cache-btn" onclick="clearCacheAndReload()">CLEAR CACHE &amp; RESTART</button>
+    <div id="unity-container">
+      <canvas id="unity-canvas" tabindex="-1"></canvas>
+      <div id="unity-loading-bar">
+        <div id="unity-logo"></div>
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+      <div id="unity-warning"></div>
+    </div>
+    
+    <script src="jszip.js"></script>
+
+    <script>
+    const loadingText = document.querySelector("#loading-text");
+    const resetCacheBtn = document.querySelector("#reset-cache-btn");
+    const CACHE_NAME = "hksilksongcache-v4";
+
+    async function clearCacheAndReload() {
+      const cacheNames = await caches.keys();
+      await Promise.all(cacheNames.map(name => caches.delete(name)));
+      window.location.reload();
+    }
+
+    // Intercept fetch calls to serve extracted assets directly from cache safely
+    const originalFetch = window.fetch;
+
+    window.fetch = async function(resource, options) {
+      let url = typeof resource === "string" ? resource : resource.url;
+      
+      // Only intercept local game bundle/asset fetches
+      if (url.includes("StreamingAssets") || url.includes(".bundle") || url.includes(".data")) {
+        try {
+          const cache = await caches.open(CACHE_NAME);
+          let cleanPath = url.split("/").pop();
+
+          let cachedResponse = await cache.match(url);
+          if (!cachedResponse && cleanPath) {
+            cachedResponse = await cache.match(cleanPath);
+          }
+
+          if (cachedResponse) {
+            // ALWAYS clone the response so reading the stream never locks/corrupts second-fetch requests
+            return cachedResponse.clone();
+          }
+        } catch (e) {
+          console.warn("Cache fetch lookup failed for:", url, e);
+        }
+      }
+
+      return originalFetch(resource, options);
+    };
+
+    async function isCached() {
+      const cache = await caches.open(CACHE_NAME);
+      const done = await cache.match("CACHE_COMPLETE");
+      return !!done;
+    }
+
+    async function cleanupOldCaches() {
+      const cacheNames = await caches.keys();
+      await Promise.all(
+        cacheNames.map(name => {
+          if (name !== CACHE_NAME && name.includes("hksilksong")) {
+            console.log("Deleting old cache version:", name);
+            return caches.delete(name);
+          }
+        })
+      );
+    }
+
+    async function unzipAndStore(zipBlob) {
+      if (!zipBlob) throw new Error("ZIP file missing or corrupted");
+
+      loadingText.textContent = "EXTRACTING ASSETS (0%)...";
+
+      const zip = await JSZip.loadAsync(zipBlob);
+      const fileKeys = Object.keys(zip.files).filter(k => !zip.files[k].dir);
+      const total = fileKeys.length;
+      const cache = await caches.open(CACHE_NAME);
+
+      let processed = 0;
+
+      // Unpack evenly in small, steady micro-batches
+      for (let i = 0; i < fileKeys.length; i++) {
+        const key = fileKeys[i];
+        const file = zip.files[key];
+        const cleanName = key.split("/").pop();
+
+        try {
+          let uint8Data = await file.async("uint8array");
+          
+          // Store under single canonical path to save Cache Storage quota
+          const storageKey = cleanName ? cleanName : key;
+          const resp = new Response(uint8Data, {
+            headers: { "Content-Type": "application/octet-stream" }
+          });
+          await cache.put(storageKey, resp);
+
+          // Immediately nullify references to allow V8 Garbage Collection
+          uint8Data = null;
+          delete zip.files[key];
+        } catch (e) {
+          console.error("Failed to extract asset:", key, e);
+        }
+
+        processed++;
+
+        // Evenly pace every 2 files with a forced tick delay to keep RAM usage flat
+        if (processed % 2 === 0 || processed === total) {
+          let pct = Math.floor((processed / total) * 100);
+          loadingText.textContent = `UNPACKING EVENLY (${pct}% - ${processed}/${total})`;
+          // 25ms yield to allow browser GC to reclaim freed array buffers
+          await new Promise(r => setTimeout(r, 25));
+        }
+      }
+
+      await cache.put("CACHE_COMPLETE", new Response("ok"));
+      console.log("Assets extracted and indexed in local storage evenly.");
+    }
+
+        processed++;
+        if (processed % 5 === 0 || processed === total) {
+          let pct = Math.floor((processed / total) * 100);
+          loadingText.textContent = `EXTRACTING ASSETS (${pct}% - ${processed}/${total})`;
+          await new Promise(r => setTimeout(r, 10)); // Allow garbage collector to run
+        }
+      }
+
+      await cache.put("CACHE_COMPLETE", new Response("ok"));
+      console.log("Assets extracted and indexed in local storage.");
+    }
+
+    let loadedBytes = 0;
+
+    const CDN_MIRRORS = [
+      "https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/",
+      "https://fastly.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/",
+      "https://raw.githack.com/web-ports/hollow-knight-silksong/master/",
+      "https://raw.githubusercontent.com/web-ports/hollow-knight-silksong/master/"
+    ];
+    let currentMirrorIndex = 0;
+
+    async function fetchPartWithProgress(path, retries = 3) {
+      for (let attempt = 0; attempt < retries; attempt++) {
+        for (let m = 0; m < CDN_MIRRORS.length; m++) {
+          const mirrorIdx = (currentMirrorIndex + m) % CDN_MIRRORS.length;
+          const url = CDN_MIRRORS[mirrorIdx] + path;
+
+          try {
+            const response = await originalFetch(url);
+            if (response.status === 404) {
+              return null; // Reached end of dynamic archive parts
+            }
+            if (response.status === 403 || !response.ok) {
+              console.warn(`Mirror ${CDN_MIRRORS[mirrorIdx]} returned HTTP ${response.status} for ${path}. Trying next mirror...`);
+              continue;
+            }
+
+            currentMirrorIndex = mirrorIdx; // Lock on to working mirror
+
+            const reader = response.body.getReader();
+            let chunks = [];
+            let received = 0;
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              received += value.length;
+              loadedBytes += value.length;
+              chunks.push(value);
+
+              let mbDone = (loadedBytes / (1024 * 1024)).toFixed(1);
+              loadingText.textContent = `DOWNLOADING ASSETS (${mbDone} MB)...`;
+            }
+
+            let fullBuffer = new Uint8Array(received);
+            let offset = 0;
+            for (let i = 0; i < chunks.length; i++) {
+              fullBuffer.set(chunks[i], offset);
+              offset += chunks[i].length;
+              chunks[i] = null;
+            }
+            chunks = null;
+            return fullBuffer.buffer;
+          } catch (err) {
+            console.warn(`Error on mirror ${CDN_MIRRORS[mirrorIdx]}:`, err);
+          }
+        }
+        console.warn(`Retry ${attempt + 1} for ${path} across all mirrors`);
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+      }
+      throw new Error(`Failed to download ${path} after trying all mirror servers.`);
+    }
+
+    async function mergeFiles(fileBase) {
+      console.log("Fetching archive parts for:", fileBase);
+      const buffers = [];
+      let partIndex = 1;
+
+      while (true) {
+        const partUrl = `${fileBase}.part${partIndex}`;
+        const buffer = await fetchPartWithProgress(partUrl);
+        if (!buffer) {
+          console.log(`Finished downloading all ${partIndex - 1} parts.`);
+          break;
+        }
+        buffers.push(buffer);
+        partIndex++;
+
+        if (partIndex % 2 === 0) await new Promise(r => setTimeout(r, 10));
+      }
+
+      if (buffers.length === 0) {
+        throw new Error("Failed to download asset parts.");
+      }
+
+      const blob = new Blob(buffers, { type: "application/zip" });
+      buffers.length = 0; // Clear references
+      return blob;
+    }
+
+    (async () => {
+      try {
+        await cleanupOldCaches(); 
+
+        if (!(await isCached())) {
+          loadingText.textContent = "DOWNLOADING ASSETS...";
+
+          let webglzip = await mergeFiles("StreamingAssets/aa/WebGL.zip");
+          await unzipAndStore(webglzip);
+
+          webglzip = null; // Clear reference to free RAM before Unity launches
+
+          loadingText.textContent = "STABILIZING MEMORY...";
+          // Extended cooldown to let browser reclaim RAM before WebAssembly allocation
+          await new Promise(r => setTimeout(r, 2500));
+        } else {
+          loadingText.textContent = "LOADING FROM LOCAL CACHE...";
+        }
+
+        const canvas = document.querySelector("#unity-canvas");
+        const loadingBar = document.querySelector("#unity-loading-bar");
+        const progressBarFull = document.querySelector("#unity-progress-bar-full");
+        const warningBanner = document.querySelector("#unity-warning");
+
+        // Enforce 1.0 DPR cap to minimize VRAM pressure
+        const safeDPR = 1.0;
+
+        canvas.addEventListener("webglcontextlost", (e) => {
+          e.preventDefault();
+          console.warn("WebGL Context Lost!");
+          if (resetCacheBtn) resetCacheBtn.style.display = "block";
+          unityShowBanner("Graphics context lost. Click 'CLEAR CACHE & RESTART' to reset.", "warning");
+        }, false);
+
+        function unityShowBanner(msg, type) {
+          function update() {
+            warningBanner.style.display = warningBanner.children.length ? 'block' : 'none';
+          }
+          let div = document.createElement('div');
+          div.innerHTML = msg;
+          warningBanner.appendChild(div);
+
+          if (type == 'error') {
+            div.style = 'background:red;padding:10px;color:white;';
+          } else {
+            if (type == 'warning') div.style = 'background:yellow;padding:10px;color:black;';
+            setTimeout(() => {
+              if (warningBanner.contains(div)) warningBanner.removeChild(div);
+              update();
+            }, 5000);
+          }
+          update();
+        }
+
+        const buildUrl = "Build";
+
+        const config = {
+          dataUrl: buildUrl + "/w-pt.data.unityweb",
+          frameworkUrl: buildUrl + "/w-pt.framework.js.unityweb",
+          codeUrl: buildUrl + "/w-pt.wasm.unityweb",
+          streamingAssetsUrl: "StreamingAssets",
+          companyName: "EDUrocks Group, Truffled, GN-Math",
+          productName: "Hollow Knight SilkSong",
+          productVersion: "1.0",
+          showBanner: unityShowBanner,
+          devicePixelRatio: safeDPR
+        };
+
+        loadingBar.style.display = "block";
+
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@latest/Build/w-pt.loader.js";
+
+        script.onload = () => {
+          createUnityInstance(canvas, config, (progress) => {
+            progressBarFull.style.width = (progress * 100) + "%";
+          })
+          .then(() => {
+            loadingBar.remove();
+            if (loadingText) loadingText.remove();
+          })
+          .catch((err) => {
+            console.error("Unity Initialization Error:", err);
+            if (resetCacheBtn) resetCacheBtn.style.display = "block";
+            if (loadingText) {
+              loadingText.style.display = "block";
+              loadingText.textContent = "LAUNCH ERROR: " + (err.message || err);
+            }
+          });
+        };
+
+        document.body.appendChild(script);
+
+      } catch (err) {
+        console.error(err);
+        if (resetCacheBtn) resetCacheBtn.style.display = "block";
+        loadingText.textContent = "ERROR: " + err.message;
+      }
+    })();
+    </script>
+
+    <div id="sidebarad1">
+      <div class="sidebar-close" onclick="this.parentElement.style.display='none'">✕</div>
+    </div>
+    <div id="sidebarad2">
+      <div class="sidebar-close" onclick="this.parentElement.style.display='none'">✕</div>
+    </div>
+  </body>
+</html>
